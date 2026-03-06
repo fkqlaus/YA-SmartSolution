@@ -72,34 +72,79 @@ com.daehoeng.basic
 
 ## 기술적 도전과 해결 과정
 
-### 1. 서비스 계층 Interface 분리 — DIP 원칙 적용
-
-**문제**  
-초기에는 서비스 구현체를 컨트롤러에서 직접 참조했습니다.  
-이 방식은 구현 변경 시 컨트롤러 코드도 함께 수정해야 해서 변경에 취약했습니다.
-
-**해결**  
-모든 서비스 클래스를 인터페이스로 분리하고, 컨트롤러는 인터페이스만 의존하도록 변경했습니다.  
-`ZoneFileService`, `PromotionObjectService`, `PromotionZoneService` 모두 인터페이스 기반으로 설계했습니다.
-
-```java
-// 컨트롤러는 인터페이스에만 의존
-public class PromotionController {
-    private final ZoneFileService zoneFileService;        // 인터페이스
-    private final PromotionObjectService promotionObjectService;  // 인터페이스
-}
-
-// 실제 구현은 구현체가 담당 (교체 가능)
-@Service
-public class ZoneFileServiceImpl implements ZoneFileService {
-    ...
-}
-```
-
-이 구조 덕분에 파일 저장 방식을 로컬 → 외부 URL 기반으로 확장할 때 컨트롤러 수정 없이 서비스 구현체만 추가하면 됐습니다.
 
 ---
 
+### 1. IoT 횡단보도 장비와 TCP 소켓 직접 통신
+
+**배경**  
+산업단지 내 횡단보도 신호 감지 장비가 보행자 감지 이벤트를 외부로 전송하는 방식이 HTTP가 아닌 **Raw TCP 소켓**이었습니다.  
+장비 제조사 스펙을 보니 커스텀 프로토콜로 데이터를 전송하는 구조였고, Spring 기반 애플리케이션 안에서 TCP 서버를 직접 구현해야 했습니다.
+
+**프로토콜 구조**  
+장비가 전송하는 메시지 형식은 아래와 같습니다.
+
+```
+#44;{"site":"F0001","direction":0,"extension":1}
+```
+
+`#44;` prefix로 시작하는 커스텀 포맷이며, 이후 JSON 페이로드가 이어지는 구조입니다.
+
+**구현**  
+`@PostConstruct`로 Spring 애플리케이션 구동 시 자동으로 TCP 서버를 시작하고, `@PreDestroy`로 종료 시 소켓을 정리하는 생명주기 연동 구조를 사용했습니다.
+
+```java
+@Component
+public class CrosswalkTcpServer {
+
+    private static final int PORT = 9090;
+    private volatile boolean running = false;
+
+    @PostConstruct
+    public void init() {
+        serverThread = new Thread(() -> start());
+        serverThread.setDaemon(true); // Spring 종료 시 함께 종료
+        serverThread.start();
+    }
+
+    @PreDestroy
+    public void cleanup() {
+        stop(); // 소켓 정리
+    }
+}
+```
+
+클라이언트(장비) 연결이 들어오면 별도 스레드에서 처리하고, 메시지 파싱과 DB 저장은 `CrosswalkMessageHandler`가 담당하도록 책임을 분리했습니다.
+
+```java
+// TCP 서버: 연결 수락만 담당
+Socket clientSocket = serverSocket.accept();
+new Thread(() -> handleClient(clientSocket)).start();
+
+// 메시지 핸들러: 파싱 + DB 저장만 담당
+public void handleMessage(String rawMessage) {
+    if (!rawMessage.startsWith("#44;")) return; // 프로토콜 검증
+
+    String jsonPart = rawMessage.substring("#44;".length());
+    CrosswalkData data = objectMapper.readValue(jsonPart, CrosswalkData.class);
+    crosswalkService.saveCrosswalkData(data);
+}
+```
+
+**운영 현황 및 인지한 개선 포인트**  
+현재는 연결 장비 수가 적어 클라이언트마다 `new Thread()`를 생성하는 방식으로도 문제없이 운영되고 있습니다.  
+다만 장비 수가 늘어날 경우 스레드가 무제한 생성되는 구조이므로, 실제 확장 상황이라면 `ExecutorService` 기반 스레드 풀로 교체해야 한다는 점을 인식하고 있습니다.
+
+```java
+// 현재 구조 (소규모 운영)
+new Thread(() -> handleClient(clientSocket)).start();
+
+// 확장 시 개선 방향
+ExecutorService threadPool = Executors.newFixedThreadPool(10);
+threadPool.submit(() -> handleClient(clientSocket));
+```
+
+---
 ### 2. 파일 순서 관리 — 드래그앤드롭 정렬 구현
 
 **문제**  
