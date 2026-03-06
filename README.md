@@ -153,16 +153,31 @@ threadPool.submit(() -> handleClient(clientSocket));
 
 **해결**  
 프론트에서 드래그앤드롭으로 순서를 변경하면, 변경된 순서 정보를 배열로 백엔드에 전송하는 구조를 설계했습니다.  
-서비스 레이어에서 파일 ID별 순서를 일괄 업데이트하는 벌크 처리로 처리했습니다.
+`{"orderUpdates": [...]}` 형태의 JSON 구조를 받기 위해 래퍼 DTO를 별도로 만들고 `@RequestBody`로 받아 처리했습니다.
 
 ```java
-// 드래그앤드롭 후 순서 일괄 업데이트
+// 래퍼 DTO
+@Getter
+@NoArgsConstructor
+public class FileOrderUpdateRequest {
+    private List<ZoneFileOrderUpdateDto> orderUpdates;
+}
+
+// 파일 순서 일괄 업데이트
 @PutMapping("/api/promotions/files/orders")
 @Transactional
-public ResponseEntity<Map<String, Object>> updateFileOrders(HttpServletRequest request) {
-    List<ZoneFileOrderUpdateDto> orderUpdates = parseOrderUpdates(request);
+public ResponseEntity<Map<String, Object>> updateFileOrders(
+        @RequestBody FileOrderUpdateRequest request) {
+
+    List<ZoneFileOrderUpdateDto> orderUpdates = request.getOrderUpdates();
+
+    if (orderUpdates == null || orderUpdates.isEmpty()) {
+        return ResponseEntity.badRequest()
+                .body(Map.of("error", "VALIDATION_ERROR", "message", "업데이트할 파일 정보가 없습니다."));
+    }
+
     int updatedCount = zoneFileService.updateFileOrders(orderUpdates);
-    return ResponseEntity.ok(Map.of("updatedCount", updatedCount));
+    return ResponseEntity.ok(Map.of("success", true, "updatedCount", updatedCount));
 }
 ```
 
